@@ -76,16 +76,6 @@ def manage_models():
                             with open(config_path) as f:
                                 config = json.load(f)
                                 model_type = config.get("model_type", "").lower()
-                                if model_type in [
-                                    "whisper",
-                                    "llava",
-                                    "paligemma",
-                                    "qwen2_vl",
-                                    "qwen2_5_vl",
-                                    "florence2",
-                                    "florence",
-                                ]:
-                                    continue
                                 config_found = True
                                 snapshot_path = Path(config_root)
                                 break
