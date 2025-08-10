@@ -61,7 +61,11 @@ def manage_models():
     else:
         cache_dir = Path(os.path.expanduser("~/.cache/huggingface"))
     
-    lm_studio_dir = Path(os.path.expanduser("~/.cache/lm-studio/models"))
+    # Allow custom LM Studio directory via environment variable
+    if "LMSTUDIO_HOME" in os.environ:
+        lm_studio_dir = Path(os.environ["LMSTUDIO_HOME"])
+    else:
+        lm_studio_dir = Path(os.path.expanduser("~/.cache/lm-studio/models"))
     
     found_models = set()
     for root, dirs, _ in os.walk(cache_dir):

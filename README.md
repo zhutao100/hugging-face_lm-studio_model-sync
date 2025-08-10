@@ -34,6 +34,29 @@ Run the script using Python:
 python lmstudio_hf.py
 ```
 
+### Using Custom Directories
+
+You can customize the directories using environment variables:
+
+```bash
+# Custom Hugging Face cache directory
+export HF_HOME="/path/to/huggingface/cache"
+python lmstudio_hf.py
+
+# Custom LM Studio models directory
+export LMSTUDIO_HOME="/path/to/lmstudio/models"
+python lmstudio_hf.py
+
+# Use XDG cache directory
+export XDG_CACHE_HOME="/path/to/cache"
+python lmstudio_hf.py
+
+# Combine multiple environment variables
+export HF_HOME="/custom/hf/cache"
+export LMSTUDIO_HOME="/custom/lmstudio/models"
+python lmstudio_hf.py
+```
+
 ### Navigation Controls
 
 - ↑/↓ arrows: Navigate through the model list
@@ -53,6 +76,7 @@ python lmstudio_hf.py
 
 - `HF_HOME`: Optional. Set this to customize your Hugging Face cache location (highest priority)
 - `XDG_CACHE_HOME`: Optional. If set, the tool will look for models in `$XDG_CACHE_HOME/huggingface`
+- `LMSTUDIO_HOME`: Optional. Set this to customize your LM Studio models directory (default: `~/.cache/lm-studio/models`)
 
 ## Notes
 
