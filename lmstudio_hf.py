@@ -9,7 +9,430 @@ import urllib.request
 import argparse
 
 
+class ModelSyncManager:
+    """Manages synchronization of models between Hugging Face cache and LM Studio."""
+
+    def __init__(self, args):
+        self.dry_run = args.dry_run
+        self.dry_run_operations = []
+
+        # Setup logging
+        if args.verbose:
+            logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
+        else:
+            logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+        # Determine directories
+        self.hf_cache_dir = self._determine_hf_cache_dir(args)
+        self.lm_studio_dir = self._determine_lm_studio_dir(args)
+
+        logging.info(f"Using Hugging Face cache directory: {self.hf_cache_dir}")
+        logging.info(f"Using LM Studio models directory: {self.lm_studio_dir}")
+        logging.info(f'Using dry run mode: {"true" if self.dry_run else "false"}')
+
+    def _determine_hf_cache_dir(self, args):
+        """Determine the Hugging Face cache directory."""
+        if args.hf_cache_dir:
+            return Path(os.path.expanduser(args.hf_cache_dir))
+        elif "HF_HOME" in os.environ:
+            return Path(os.environ["HF_HOME"])
+        elif "XDG_CACHE_HOME" in os.environ:
+            return Path(os.environ["XDG_CACHE_HOME"]) / "huggingface"
+        else:
+            return Path(os.path.expanduser("~/.cache/huggingface"))
+
+    def _determine_lm_studio_dir(self, args):
+        """Determine the LM Studio models directory."""
+        if args.lm_studio_dir:
+            return Path(os.path.expanduser(args.lm_studio_dir))
+        elif "LMSTUDIO_HOME" in os.environ:
+            return Path(os.environ["LMSTUDIO_HOME"])
+        else:
+            return Path(os.path.expanduser("~/.cache/lm-studio/models"))
+
+    def sync_models(self):
+        """Main synchronization function."""
+
+        # Discover models
+        hf_models = self._discover_hf_models()
+        lm_models = self._discover_lm_models()
+
+        # Sync Hugging Face models to LM Studio
+        self._sync_hf_to_lm(hf_models, lm_models)
+
+        # Sync LM Studio models to Hugging Face
+        self._sync_lm_to_hf(lm_models, hf_models)
+
+        # Show dry run summary if needed
+        if self.dry_run:
+            self._show_dry_run_summary()
+
+    def _discover_hf_models(self):
+        """Discover models in the Hugging Face cache."""
+        hf_model_candidates = set()
+
+        # Look in hub directory if it exists
+        hf_hub_dir = self.hf_cache_dir / "hub"
+        hf_search_dirs = [hf_hub_dir] if hf_hub_dir.exists() else []
+        hf_search_dirs.append(self.hf_cache_dir)
+
+        for search_dir in hf_search_dirs:
+            for root, dirs, _ in os.walk(search_dir):
+                for d in dirs:
+                    # Skip datasets directories
+                    if d.startswith("datasets--") or "datasets" in Path(root).parts:
+                        continue
+
+                    # Check for models--org--name pattern
+                    if d.startswith("models--") and "--" in d:
+                        model_dir = Path(root) / d
+                        # Extract model name from models--org--name format
+                        parts = d.replace("models--", "").split("--")
+                        model_name = "/".join(parts)
+                    elif "--" in d:  # Check for other HF naming patterns
+                        model_dir = Path(root) / d
+                        parts = d.split("--")
+                        model_name = "/".join(parts)
+                    else:
+                        continue
+
+                    # Look for snapshots directory
+                    snapshots_dir = model_dir / "snapshots"
+                    if not snapshots_dir.exists():
+                        continue
+
+                    # Search for snapshots - with or without config.json
+                    model_type = "unknown"
+                    snapshot_path = None
+
+                    # Try to find the main snapshot using refs/main
+                    refs_main_path = model_dir / "refs" / "main"
+                    if refs_main_path.exists():
+                        with open(refs_main_path) as f:
+                            commit_hash = f.read().strip()
+                        snapshot_path = snapshots_dir / commit_hash
+                        if not snapshot_path.exists():
+                            snapshot_path = None
+
+                    # If no main snapshot found, walk through snapshots directory
+                    if not snapshot_path:
+                        for config_root, snapshot_dirs, config_files in os.walk(snapshots_dir):
+                            # Skip the snapshots directory itself, look in subdirectories
+                            if config_root == str(snapshots_dir) and snapshot_dirs:
+                                continue
+
+                            # If we found files in a snapshot subdirectory, this is a valid model
+                            if config_files or snapshot_dirs:
+                                snapshot_path = Path(config_root)
+                                break
+
+                    if snapshot_path:
+                        # Try to find config.json for model type
+                        config_path = snapshot_path / "config.json"
+                        if config_path.exists():
+                            try:
+                                with open(config_path) as f:
+                                    config = json.load(f)
+                                    model_type = config.get("model_type", "unknown").lower()
+                            except (json.JSONDecodeError, FileNotFoundError):
+                                pass
+
+                    if snapshot_path and model_name:
+                        # Check if this model is already a reverse-synced model (symlinks pointing to LM Studio)
+                        is_reverse_synced = False
+                        for item in snapshot_path.iterdir():
+                            if item.is_symlink():
+                                resolved_path = Path(os.path.realpath(item))
+                                if self.lm_studio_dir in resolved_path.parents:
+                                    logging.debug(
+                                        f"Hugging Face model {model_name} is synced from LM Studio: {resolved_path}, skipping")
+                                    is_reverse_synced = True
+                                    break
+
+                        if not is_reverse_synced:
+                            # Store model even if no config.json was found
+                            hf_model_candidates.add((model_type, model_name, snapshot_path))
+
+        return hf_model_candidates
+
+    def _discover_lm_models(self):
+        """Discover models in the LM Studio directory."""
+        existing_lm_models = {}  # Maps normalized names to actual paths
+        lm_model_candidates = []  # Models to sync from LM Studio to Hugging Face
+
+        if self.lm_studio_dir.exists():
+            # Check for org/model structure (subdirectories)
+            for org_dir in self.lm_studio_dir.iterdir():
+                if org_dir.is_dir():
+                    # Check if this is an org directory with model subdirectories
+                    has_subdirs = False
+                    try:
+                        for model_dir in org_dir.iterdir():
+                            if model_dir.is_dir():
+                                has_subdirs = True
+                                # This is org/model format
+                                model_name = f"{org_dir.name}/{model_dir.name}"
+                                existing_lm_models[model_name] = model_dir
+
+                                # Check if this model is already a forward-synced model (symlinks pointing to HF cache)
+                                is_forward_synced = False
+                                for item in model_dir.iterdir():
+                                    if item.is_symlink():
+                                        resolved_path = Path(os.path.realpath(item))
+                                        if self.hf_cache_dir in resolved_path.parents:
+                                            logging.debug(
+                                                f"LM Studio model {model_name} is synced from Hugging Face cache: {resolved_path}, skipping")
+                                            is_forward_synced = True
+                                            break
+
+                                if not model_dir.is_symlink() and not is_forward_synced:
+                                    lm_model_candidates.append((model_name, model_dir))
+                    except:
+                        pass  # Handle permission errors
+
+                    # If no subdirectories, this might be a direct model directory
+                    if not has_subdirs:
+                        existing_lm_models[org_dir.name] = org_dir
+
+                        # Check if this model is already a forward-synced model (symlinks pointing to HF cache)
+                        is_forward_synced = False
+                        for item in org_dir.iterdir():
+                            if item.is_symlink():
+                                resolved_path = Path(os.path.realpath(item))
+                                if self.hf_cache_dir in resolved_path.parents:
+                                    is_forward_synced = True
+                                    break
+
+                        if not org_dir.is_symlink() and not is_forward_synced:
+                            lm_model_candidates.append((org_dir.name, org_dir))
+
+        return existing_lm_models, lm_model_candidates
+
+    def _sync_hf_to_lm(self, hf_models, lm_models):
+        """Sync models from Hugging Face to LM Studio."""
+        existing_lm_models = lm_models[0]  # Extract existing models from tuple
+
+        if not hf_models:
+            logging.info("No models found in Hugging Face cache to sync to LM Studio.")
+            return
+
+        # Create list of models with their current import status
+        hf_to_lm_model_choices = []
+        for model_type, model, snapshot_path in sorted(hf_models):
+            is_imported = False
+            actual_target_path = None
+
+            # Check for the exact model path as it would be created
+            if model in existing_lm_models:
+                is_imported = True
+                actual_target_path = existing_lm_models[model]
+
+            # If not found, use default path for new imports or removals
+            if actual_target_path is None:
+                actual_target_path = self.lm_studio_dir / model
+
+            status = " (already imported)" if is_imported else ""
+            display_name = f"({model_type}) {model}{status}"
+            hf_to_lm_model_choices.append((display_name, model, is_imported,
+                                          snapshot_path, actual_target_path))
+
+        # Show interactive selection menu for importing to LM Studio
+        if hf_to_lm_model_choices:
+            selected_hf_models = select_models(
+                hf_to_lm_model_choices, "Export Hugging Face cache to LM Studio models")
+            if selected_hf_models:
+                logging.info("Syncing models to LM Studio...")
+                for display_name, model_name, is_imported, snapshot_path, target_path in selected_hf_models:
+                    if is_imported:
+                        # Remove existing directory or symlink
+                        if target_path.is_symlink() or target_path.exists():
+                            if target_path.is_dir():
+                                self._add_dry_run_operation(
+                                    f"Would remove directory: {target_path}")
+                                if not self.dry_run:
+                                    shutil.rmtree(target_path)
+                            else:
+                                self._add_dry_run_operation(f"Would remove symlink: {target_path}")
+                                if not self.dry_run:
+                                    target_path.unlink()
+                        logging.info(f"Removed {model_name} from LM Studio")
+                    else:
+                        # Create parent directories and target directory
+                        self._add_dry_run_operation(f"Would create directory: {target_path}")
+                        if not self.dry_run:
+                            target_path.mkdir(parents=True, exist_ok=True)
+
+                        # Create symbolic links for all files in the snapshot directory
+                        for item in snapshot_path.iterdir():
+                            link_path = target_path / item.name
+                            # Only create symlink if the target path does not exist or is already a symlink
+                            if not link_path.exists() or link_path.is_symlink():
+                                self._add_dry_run_operation(
+                                    f"Would create symlink: {link_path} -> {item}")
+                                if not self.dry_run:
+                                    os.symlink(item, link_path)
+                            else:
+                                logging.info(
+                                    f"    - Skipping {item.name}: non-symlink file already exists in LM Studio")
+
+                        logging.info(f"Imported {model_name} to LM Studio (symlinked files)")
+
+    def _sync_lm_to_hf(self, lm_models, hf_models):
+        """Sync models from LM Studio to Hugging Face."""
+        lm_model_candidates = lm_models[1]  # Extract candidates from tuple
+
+        # Show interactive selection menu for exporting to Hugging Face
+        if not lm_model_candidates:
+            logging.info("No models found in LM Studio to sync to Hugging Face cache.")
+            return
+
+        lm_to_hf_model_choices = []
+        for model_name, model_path in lm_model_candidates:
+            # Check if the model already exists in the Hugging Face cache
+            hf_model_path = self.hf_cache_dir / "hub" / f"models--{model_name.replace('/', '--')}"
+            if not hf_model_path.exists():
+                display_name = f"(local) {model_name}"
+                lm_to_hf_model_choices.append((display_name, model_name, model_path, hf_model_path))
+
+        if lm_to_hf_model_choices:
+            selected_lm_models = select_models(
+                lm_to_hf_model_choices, "Syncing LM Studio models to Hugging Face cache")
+            if selected_lm_models:
+                for display_name, model_name, model_path, hf_model_path in selected_lm_models:
+                    print(f"Syncing {model_name} from LM Studio to Hugging Face cache...")
+                    try:
+                        # 1. Fetch model info from Hugging Face Hub
+                        api_url = f"https://huggingface.co/api/models/{model_name}"
+                        response = web_fetch(api_url)
+
+                        if "error" in response:
+                            print(
+                                f"  - Error fetching model info for {model_name}: {response['error']}")
+                            continue
+
+                        model_info = json.loads(response["content"])
+                        commit_hash = model_info.get("sha")
+                        if not commit_hash:
+                            print(f"  - Could not find commit hash for {model_name}")
+                            continue
+
+                        # 2. Create Hugging Face cache directory structure
+                        self._add_dry_run_operation(f"Would create directory: {hf_model_path}")
+                        if not self.dry_run:
+                            hf_model_path.mkdir(parents=True, exist_ok=True)
+                        self._add_dry_run_operation(
+                            f"Would create directory: {hf_model_path / 'refs'}")
+                        if not self.dry_run:
+                            (hf_model_path / "refs").mkdir(exist_ok=True)
+                        snapshots_dir = hf_model_path / "snapshots"
+                        self._add_dry_run_operation(f"Would create directory: {snapshots_dir}")
+                        if not self.dry_run:
+                            snapshots_dir.mkdir(exist_ok=True)
+                        snapshot_path = snapshots_dir / commit_hash
+                        self._add_dry_run_operation(f"Would create directory: {snapshot_path}")
+                        if not self.dry_run:
+                            snapshot_path.mkdir(exist_ok=True)
+
+                        # 3. Create refs/main file
+                        self._add_dry_run_operation(
+                            f"Would write file: {hf_model_path / 'refs' / 'main'}")
+                        if not self.dry_run:
+                            with open(hf_model_path / "refs" / "main", "w") as f:
+                                f.write(commit_hash)
+
+                        # 4. Create blobs and snapshot symlinks
+                        blobs_dir = hf_model_path / "blobs"
+                        self._add_dry_run_operation(f"Would create directory: {blobs_dir}")
+                        if not self.dry_run:
+                            blobs_dir.mkdir(exist_ok=True)
+
+                        for item in model_path.iterdir():
+                            if item.is_file():
+                                # Calculate SHA256 hash of the file
+                                with open(item, "rb") as f:
+                                    sha256_hash = hashlib.sha256(f.read()).hexdigest()
+
+                                # Create blob symlink
+                                blob_path = blobs_dir / sha256_hash
+                                # Only create symlink if the target path does not exist or is already a symlink
+                                if not blob_path.exists() or blob_path.is_symlink():
+                                    self._add_dry_run_operation(
+                                        f"Would create symlink: {blob_path} -> {item}")
+                                    if not self.dry_run:
+                                        os.symlink(item, blob_path)
+                                else:
+                                    print(
+                                        f"    - Skipping blob for {item.name}: non-symlink file already exists in Hugging Face blobs")
+
+                                # Create snapshot symlink
+                                snapshot_link_path = snapshot_path / item.name
+                                # Only create symlink if the target path does not exist or is already a symlink
+                                if not snapshot_link_path.exists() or snapshot_link_path.is_symlink():
+                                    self._add_dry_run_operation(
+                                        f"Would create symlink: {snapshot_link_path} -> {blob_path}")
+                                    if not self.dry_run:
+                                        os.symlink(blob_path, snapshot_link_path)
+                                else:
+                                    print(
+                                        f"    - Skipping snapshot symlink for {item.name}: non-symlink file already exists in Hugging Face snapshots")
+
+                        # 5. Create config.json and other small metadata files from Hub
+                        large_file_extensions = [".gguf", ".safetensors"]
+                        for file_info in model_info.get("siblings", []):
+                            file_name = file_info.get("rfilename")
+                            if file_name and not any(file_name.endswith(ext) for ext in large_file_extensions):
+                                snapshot_file_path = snapshot_path / file_name
+                                # Skip if a symlink with the same name already exists
+                                if snapshot_file_path.is_symlink():
+                                    continue
+
+                                file_url = f"https://huggingface.co/{model_name}/resolve/main/{file_name}"
+                                file_response = web_fetch(file_url)
+                                if "content" in file_response:
+                                    # Calculate SHA256 hash of the file content
+                                    sha256_hash = hashlib.sha256(
+                                        file_response["content"].encode('utf-8')).hexdigest()
+                                    blob_path = blobs_dir / sha256_hash
+
+                                    # Write the file content to the blob
+                                    if not blob_path.exists():
+                                        self._add_dry_run_operation(
+                                            f"Would write file: {blob_path}")
+                                        if not self.dry_run:
+                                            with open(blob_path, "w") as f:
+                                                f.write(file_response["content"])
+
+                                    # Create snapshot symlink to the blob
+                                    if not snapshot_file_path.exists():
+                                        self._add_dry_run_operation(
+                                            f"Would create symlink: {snapshot_file_path} -> {blob_path}")
+                                        if not self.dry_run:
+                                            os.symlink(blob_path, snapshot_file_path)
+
+                        print(
+                            f"  - Successfully synced {model_name} to Hugging Face cache at {hf_model_path}")
+
+                    except Exception as e:
+                        print(
+                            f"  - An error occurred while syncing {model_name} to Hugging Face cache: {e}")
+
+    def _add_dry_run_operation(self, operation):
+        """Add an operation to the dry run operations list."""
+        self.dry_run_operations.append(operation)
+
+    def _show_dry_run_summary(self):
+        """Show a summary of operations that would be performed in dry run mode."""
+        print("\n--- Dry Run Summary ---")
+        if self.dry_run_operations:
+            for op in self.dry_run_operations:
+                print(op)
+        else:
+            print("No file operations would be performed.")
+
+
 def select_models(model_choices, title):
+    input("\nPress Enter to continue...")
+
     # Don't pre-select any models
     selected = [False] * len(model_choices)
     idx = 0
@@ -78,387 +501,21 @@ def web_fetch(url):
         return {"error": str(e)}
 
 
-def manage_models():
-    "Sync models between the Huggingface cache and the LM studio models."
-
+def main():
+    """Main entry point."""
     parser = argparse.ArgumentParser(description="LM Studio - Hugging Face Model Manager")
     parser.add_argument("--dry-run", action="store_true",
                         help="Perform a dry run without making any changes.")
     parser.add_argument("--lm-studio-dir", type=str, help="Specify the LM Studio models directory.")
     parser.add_argument("--hf-cache-dir", type=str,
-                        help="Specify the Huggingface cache directory.")
+                        help="Specify the Hugging Face cache directory.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose (debug) logging.")
     args = parser.parse_args()
-    dry_run = args.dry_run
-    dry_run_operations = []
 
-    if args.verbose:
-        logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
-    else:
-        logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-    # Determine hf_cache_dir
-    if args.hf_cache_dir:
-        hf_cache_dir = Path(os.path.expanduser(args.hf_cache_dir))
-    elif "HF_HOME" in os.environ:
-        hf_cache_dir = Path(os.environ["HF_HOME"])
-    elif "XDG_CACHE_HOME" in os.environ:
-        hf_cache_dir = Path(os.environ["XDG_CACHE_HOME"]) / "huggingface"
-    else:
-        hf_cache_dir = Path(os.path.expanduser("~/.cache/huggingface"))
-
-    # Determine lm_studio_dir
-    if args.lm_studio_dir:
-        lm_studio_dir = Path(os.path.expanduser(args.lm_studio_dir))
-    elif "LMSTUDIO_HOME" in os.environ:
-        lm_studio_dir = Path(os.environ["LMSTUDIO_HOME"])
-    else:
-        lm_studio_dir = Path(os.path.expanduser("~/.cache/lm-studio/models"))
-
-    logging.info(f"Using Huggingface cache directory: {hf_cache_dir}")
-    logging.info(f"Using LM Studio models directory: {lm_studio_dir}")
-    logging.info(f'Using dry run mode: {"true" if dry_run else "false"}')
-    input("\nPress Enter to continue...")  # Wait for user confirmation
-
-    hf_model_candidates = set()
-    # Look in hub directory if it exists
-    hf_hub_dir = hf_cache_dir / "hub"
-    hf_search_dirs = [hf_hub_dir] if hf_hub_dir.exists() else []
-    hf_search_dirs.append(hf_cache_dir)
-
-    for search_dir in hf_search_dirs:
-        for root, dirs, _ in os.walk(search_dir):
-            for d in dirs:
-                # Skip datasets directories
-                if d.startswith("datasets--") or "datasets" in Path(root).parts:
-                    continue
-
-                # Check for models--org--name pattern
-                if d.startswith("models--") and "--" in d:
-                    model_dir = Path(root) / d
-                    # Extract model name from models--org--name format
-                    parts = d.replace("models--", "").split("--")
-                    model_name = "/".join(parts)
-                elif "--" in d:  # Check for other HF naming patterns
-                    model_dir = Path(root) / d
-                    parts = d.split("--")
-                    model_name = "/".join(parts)
-                else:
-                    continue
-
-                # Look for snapshots directory
-                snapshots_dir = model_dir / "snapshots"
-                if not snapshots_dir.exists():
-                    continue
-
-                # Search for snapshots - with or without config.json
-                model_type = "unknown"
-                snapshot_path = None
-
-                # Try to find the main snapshot using refs/main
-                refs_main_path = model_dir / "refs" / "main"
-                if refs_main_path.exists():
-                    with open(refs_main_path) as f:
-                        commit_hash = f.read().strip()
-                    snapshot_path = snapshots_dir / commit_hash
-                    if not snapshot_path.exists():
-                        snapshot_path = None
-
-                # If no main snapshot found, walk through snapshots directory
-                if not snapshot_path:
-                    for config_root, snapshot_dirs, config_files in os.walk(snapshots_dir):
-                        # Skip the snapshots directory itself, look in subdirectories
-                        if config_root == str(snapshots_dir) and snapshot_dirs:
-                            continue
-
-                        # If we found files in a snapshot subdirectory, this is a valid model
-                        if config_files or snapshot_dirs:
-                            snapshot_path = Path(config_root)
-                            break
-
-                if snapshot_path:
-                    # Try to find config.json for model type
-                    config_path = snapshot_path / "config.json"
-                    if config_path.exists():
-                        try:
-                            with open(config_path) as f:
-                                config = json.load(f)
-                                model_type = config.get("model_type", "unknown").lower()
-                        except (json.JSONDecodeError, FileNotFoundError):
-                            pass
-
-                if snapshot_path and model_name:
-                    # Check if this model is already a reverse-synced model (symlinks pointing to LM Studio)
-                    is_reverse_synced = False
-                    for item in snapshot_path.iterdir():
-                        if item.is_symlink():
-                            resolved_path = Path(os.path.realpath(item))
-                            if lm_studio_dir in resolved_path.parents:
-                                logging.debug(
-                                    f"Huggingface model {model_name} is synced from LM Studio: {resolved_path}, skipping")
-                                is_reverse_synced = True
-                                break
-
-                    if not is_reverse_synced:
-                        # Store model even if no config.json was found
-                        hf_model_candidates.add((model_type, model_name, snapshot_path))
-
-    # First, scan all existing models in LM Studio directory recursively
-    existing_lm_models = {}  # Maps normalized names to actual paths
-    lm_model_candidates = []  # Models to sync from LM Studio to Hugging Face
-    if lm_studio_dir.exists():
-        # Check for org/model structure (subdirectories)
-        for org_dir in lm_studio_dir.iterdir():
-            if org_dir.is_dir():
-                # Check if this is an org directory with model subdirectories
-                has_subdirs = False
-                try:
-                    for model_dir in org_dir.iterdir():
-                        if model_dir.is_dir():
-                            has_subdirs = True
-                            # This is org/model format
-                            model_name = f"{org_dir.name}/{model_dir.name}"
-                            existing_lm_models[model_name] = model_dir
-
-                            # Check if this model is already a forward-synced model (symlinks pointing to HF cache)
-                            is_forward_synced = False
-                            for item in model_dir.iterdir():
-                                if item.is_symlink():
-                                    resolved_path = Path(os.path.realpath(item))
-                                    if hf_cache_dir in resolved_path.parents:
-                                        logging.debug(
-                                            f"LM Studio model {model_name} is synced from Huggingface cache: {resolved_path}, skipping")
-                                        is_forward_synced = True
-                                        break
-
-                            if not model_dir.is_symlink() and not is_forward_synced:
-                                lm_model_candidates.append((model_name, model_dir))
-                except:
-                    pass  # Handle permission errors
-
-                # If no subdirectories, this might be a direct model directory
-                if not has_subdirs:
-                    existing_lm_models[org_dir.name] = org_dir
-
-                    # Check if this model is already a forward-synced model (symlinks pointing to HF cache)
-                    is_forward_synced = False
-                    for item in org_dir.iterdir():
-                        if item.is_symlink():
-                            resolved_path = Path(os.path.realpath(item))
-                            if hf_cache_dir in resolved_path.parents:
-                                is_forward_synced = True
-                                break
-
-                    if not org_dir.is_symlink() and not is_forward_synced:
-                        lm_model_candidates.append((org_dir.name, org_dir))
-
-    if not hf_model_candidates:
-        logging.info("No models found in Huggingface cache to sync to LM Studio.")
-    else:
-        # Create list of models with their current import status
-        hf_to_lm_model_choices = []
-        for model_type, model, snapshot_path in sorted(hf_model_candidates):
-            is_imported = False
-            actual_target_path = None
-
-            # Check for the exact model path as it would be created
-            if model in existing_lm_models:
-                is_imported = True
-                actual_target_path = existing_lm_models[model]
-
-            # If not found, use default path for new imports or removals
-            if actual_target_path is None:
-                actual_target_path = lm_studio_dir / model
-
-            status = " (already imported)" if is_imported else ""
-            display_name = f"({model_type}) {model}{status}"
-            hf_to_lm_model_choices.append((display_name, model, is_imported,
-                                          snapshot_path, actual_target_path))
-
-        # Show interactive selection menu for importing to LM Studio
-        if hf_to_lm_model_choices:
-            selected_hf_models = select_models(
-                hf_to_lm_model_choices, "Export Huggingface cache to LM Studio models")
-            if selected_hf_models:
-                logging.info("Syncing models to LM Studio...")
-                for display_name, model_name, is_imported, snapshot_path, target_path in selected_hf_models:
-                    if is_imported:
-                        # Remove existing directory or symlink
-                        if target_path.is_symlink() or target_path.exists():
-                            if target_path.is_dir():
-                                dry_run_operations.append(f"Would remove directory: {target_path}")
-                                if not dry_run:
-                                    shutil.rmtree(target_path)
-                            else:
-                                dry_run_operations.append(f"Would remove symlink: {target_path}")
-                                if not dry_run:
-                                    target_path.unlink()
-                        logging.info(f"Removed {model_name} from LM Studio")
-
-                    else:
-                        # Create parent directories and target directory
-                        dry_run_operations.append(f"Would create directory: {target_path}")
-                        if not dry_run:
-                            target_path.mkdir(parents=True, exist_ok=True)
-
-                        # Create symbolic links for all files in the snapshot directory
-                        for item in snapshot_path.iterdir():
-                            link_path = target_path / item.name
-                            # Only create symlink if the target path does not exist or is already a symlink
-                            if not link_path.exists() or link_path.is_symlink():
-                                dry_run_operations.append(
-                                    f"Would create symlink: {link_path} -> {item}")
-                                if not dry_run:
-                                    os.symlink(item, link_path)
-                            else:
-                                logging.info(
-                                    f"    - Skipping {item.name}: non-symlink file already exists in LM Studio")
-
-                        logging.info(f"Imported {model_name} to LM Studio (symlinked files)")
-    
-    input("\nPress Enter to continue...")
-
-    # Show interactive selection menu for exporting to Hugging Face
-    if not lm_model_candidates:
-        logging.info("No models found in LM Studio to sync to Huggingface cache.")
-    else:
-        lm_to_hf_model_choices = []
-        for model_name, model_path in lm_model_candidates:
-            # Check if the model already exists in the Huggingface cache
-            hf_model_path = hf_cache_dir / "hub" / f"models--{model_name.replace('/', '--')}"
-            if not hf_model_path.exists():
-                display_name = f"(local) {model_name}"
-                lm_to_hf_model_choices.append((display_name, model_name, model_path, hf_model_path))
-
-        if lm_to_hf_model_choices:
-            selected_lm_models = select_models(
-                lm_to_hf_model_choices, "Syncing LM Studio models to Huggingface cache")
-            if selected_lm_models:
-                for display_name, model_name, model_path, hf_model_path in selected_lm_models:
-                    print(f"Syncing {model_name} from LM Studio to Huggingface cache...")
-                    try:
-                        # 1. Fetch model info from Hugging Face Hub
-                        api_url = f"https://huggingface.co/api/models/{model_name}"
-                        response = web_fetch(api_url)
-
-                        if "error" in response:
-                            print(
-                                f"  - Error fetching model info for {model_name}: {response['error']}")
-                            continue
-
-                        model_info = json.loads(response["content"])
-                        commit_hash = model_info.get("sha")
-                        if not commit_hash:
-                            print(f"  - Could not find commit hash for {model_name}")
-                            continue
-
-                        # 2. Create Huggingface cache directory structure
-                        dry_run_operations.append(f"Would create directory: {hf_model_path}")
-                        if not dry_run:
-                            hf_model_path.mkdir(parents=True, exist_ok=True)
-                        dry_run_operations.append(
-                            f"Would create directory: {hf_model_path / 'refs'}")
-                        if not dry_run:
-                            (hf_model_path / "refs").mkdir(exist_ok=True)
-                        snapshots_dir = hf_model_path / "snapshots"
-                        dry_run_operations.append(f"Would create directory: {snapshots_dir}")
-                        if not dry_run:
-                            snapshots_dir.mkdir(exist_ok=True)
-                        snapshot_path = snapshots_dir / commit_hash
-                        dry_run_operations.append(f"Would create directory: {snapshot_path}")
-                        if not dry_run:
-                            snapshot_path.mkdir(exist_ok=True)
-
-                        # 3. Create refs/main file
-                        dry_run_operations.append(
-                            f"Would write file: {hf_model_path / 'refs' / 'main'}")
-                        if not dry_run:
-                            with open(hf_model_path / "refs" / "main", "w") as f:
-                                f.write(commit_hash)
-
-                        # 4. Create blobs and snapshot symlinks
-                        blobs_dir = hf_model_path / "blobs"
-                        dry_run_operations.append(f"Would create directory: {blobs_dir}")
-                        if not dry_run:
-                            blobs_dir.mkdir(exist_ok=True)
-
-                        for item in model_path.iterdir():
-                            if item.is_file():
-                                # Calculate SHA256 hash of the file
-                                with open(item, "rb") as f:
-                                    sha256_hash = hashlib.sha256(f.read()).hexdigest()
-
-                                # Create blob symlink
-                                blob_path = blobs_dir / sha256_hash
-                                # Only create symlink if the target path does not exist or is already a symlink
-                                if not blob_path.exists() or blob_path.is_symlink():
-                                    dry_run_operations.append(
-                                        f"Would create symlink: {blob_path} -> {item}")
-                                    if not dry_run:
-                                        os.symlink(item, blob_path)
-                                else:
-                                    print(
-                                        f"    - Skipping blob for {item.name}: non-symlink file already exists in Hugging Face blobs")
-
-                                # Create snapshot symlink
-                                snapshot_link_path = snapshot_path / item.name
-                                # Only create symlink if the target path does not exist or is already a symlink
-                                if not snapshot_link_path.exists() or snapshot_link_path.is_symlink():
-                                    dry_run_operations.append(
-                                        f"Would create symlink: {snapshot_link_path} -> {blob_path}")
-                                    if not dry_run:
-                                        os.symlink(blob_path, snapshot_link_path)
-                                else:
-                                    print(
-                                        f"    - Skipping snapshot symlink for {item.name}: non-symlink file already exists in Hugging Face snapshots")
-
-                        # 5. Create config.json and other small metadata files from Hub
-                        large_file_extensions = [".gguf", ".safetensors"]
-                        for file_info in model_info.get("siblings", []):
-                            file_name = file_info.get("rfilename")
-                            if file_name and not any(file_name.endswith(ext) for ext in large_file_extensions):
-                                snapshot_file_path = snapshot_path / file_name
-                                # Skip if a symlink with the same name already exists
-                                if snapshot_file_path.is_symlink():
-                                    continue
-
-                                file_url = f"https://huggingface.co/{model_name}/resolve/main/{file_name}"
-                                file_response = web_fetch(file_url)
-                                if "content" in file_response:
-                                    # Calculate SHA256 hash of the file content
-                                    sha256_hash = hashlib.sha256(
-                                        file_response["content"].encode('utf-8')).hexdigest()
-                                    blob_path = blobs_dir / sha256_hash
-
-                                    # Write the file content to the blob
-                                    if not blob_path.exists():
-                                        dry_run_operations.append(f"Would write file: {blob_path}")
-                                        if not dry_run:
-                                            with open(blob_path, "w") as f:
-                                                f.write(file_response["content"])
-
-                                    # Create snapshot symlink to the blob
-                                    if not snapshot_file_path.exists():
-                                        dry_run_operations.append(
-                                            f"Would create symlink: {snapshot_file_path} -> {blob_path}")
-                                        if not dry_run:
-                                            os.symlink(blob_path, snapshot_file_path)
-
-                        print(
-                            f"  - Successfully synced {model_name} to Huggingface cache at {hf_model_path}")
-
-                    except Exception as e:
-                        print(
-                            f"  - An error occurred while syncing {model_name} to Huggingface cache: {e}")
-
-    if dry_run:
-        print("\n--- Dry Run Summary ---")
-        if dry_run_operations:
-            for op in dry_run_operations:
-                print(op)
-        else:
-            print("No file operations would be performed.")
+    # Create manager and sync models
+    manager = ModelSyncManager(args)
+    manager.sync_models()
 
 
 if __name__ == "__main__":
-    manage_models()
+    main()
