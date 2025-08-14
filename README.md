@@ -11,6 +11,9 @@ A command-line utility to manage models between your Hugging Face cache and LM S
 - Terminal-based UI with scrolling for large model lists
 - Shows model type (e.g., llama, bert, gpt2) for easy identification
 - Already imported models are pre-selected and clearly marked
+- Bidirectional synchronization (Hugging Face ↔ LM Studio)
+- Dry-run mode for previewing operations
+- Verbose logging for debugging
 
 ## Prerequisites
 
@@ -57,6 +60,19 @@ export LMSTUDIO_HOME="/custom/lmstudio/models"
 python lmstudio_hf.py
 ```
 
+### Command Line Options
+
+```bash
+# Perform a dry run to preview operations without making changes
+python lmstudio_hf.py --dry-run
+
+# Specify custom directories via command line
+python lmstudio_hf.py --hf-cache-dir "/path/to/hf/cache" --lm-studio-dir "/path/to/lmstudio/models"
+
+# Enable verbose logging for debugging
+python lmstudio_hf.py --verbose
+```
+
 ### Navigation Controls
 
 - ↑/↓ arrows: Navigate through the model list
@@ -72,6 +88,11 @@ python lmstudio_hf.py
 4. Shows model type and import status for each model
 5. Pre-selects already imported models for easy management
 
+Additionally, it can sync models from LM Studio back to the Hugging Face format:
+1. Scans your LM Studio models directory for local models
+2. Exports them to Hugging Face cache format with proper directory structure
+3. Fetches metadata from Hugging Face Hub to create complete cache entries
+
 ## Environment Variables
 
 - `HF_HOME`: Optional. Set this to customize your Hugging Face cache location (highest priority)
@@ -84,6 +105,7 @@ python lmstudio_hf.py
 - Already imported models are marked with "(already imported)" and pre-selected
 - Deselecting an already imported model and confirming will remove it from LM Studio
 - Model types are displayed in parentheses (e.g., `(llama)`, `(bert)`, `(gpt2)`)
+- The tool supports bidirectional synchronization between Hugging Face and LM Studio
 
 ## Contributing
 
@@ -91,4 +113,4 @@ Feel free to open issues or submit pull requests for any improvements or bug fix
 
 ## License
 
-[MIT License](LICENSE) 
+[MIT License](LICENSE)
