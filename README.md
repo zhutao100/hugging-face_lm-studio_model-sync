@@ -1,19 +1,16 @@
 # LM Studio - Hugging Face Model Manager
 
-A command-line utility to manage models between your Hugging Face cache and LM Studio. This tool makes it easy to import and manage any models you've downloaded from Hugging Face into LM Studio.
+A command-line utility to seamlessly manage and synchronize machine learning models between your Hugging Face cache and LM Studio. This tool simplifies the process of importing, exporting, and maintaining models across both platforms.
 
-## Features
+## Key Features
 
-- Interactive model selection interface with keyboard navigation
-- Automatic detection of all models in your Hugging Face cache
-- Smart handling of model imports via symbolic links
-- Support for model removal and re-import
-- Terminal-based UI with scrolling for large model lists
-- Shows model type (e.g., llama, bert, gpt2) for easy identification
-- Already imported models are pre-selected and clearly marked
-- Bidirectional synchronization (Hugging Face ↔ LM Studio)
-- Dry-run mode for previewing operations
-- Verbose logging for debugging
+- **Bidirectional Synchronization:** Effortlessly sync models in both directions—from Hugging Face to LM Studio and from LM Studio to Hugging Face.
+- **Interactive Model Selection:** A user-friendly interface to browse and select models for synchronization. It works on both UNIX-like systems and Windows.
+- **Space-Efficient:** Uses symbolic links to import and export models, saving significant disk space by avoiding file duplication.
+- **Smart Model Discovery:** Automatically detects models in your Hugging Face and LM Studio directories.
+- **Flexible Configuration:** Customize cache directories using command-line arguments or environment variables.
+- **Dry Run Mode:** Preview all file operations without making any actual changes to your system.
+- **Verbose Logging:** Enable detailed logging for debugging purposes.
 
 ## Prerequisites
 
@@ -24,93 +21,44 @@ A command-line utility to manage models between your Hugging Face cache and LM S
 ## Installation
 
 1. Clone this repository:
-```bash
-git clone https://github.com/ivanfioravanti/lmstudio_hf.git
-cd lmstudio_hf
-```
+
+    ```bash
+    git clone https://github.com/ivanfioravanti/lmstudio_hf.git
+    cd lmstudio_hf
+    ```
 
 ## Usage
 
-Run the script using Python:
+Run the script from your terminal:
 
 ```bash
 python lmstudio_hf.py
 ```
 
-### Using Custom Directories
+### Command-Line Options
 
-You can customize the directories using environment variables:
+- `--dry-run`: Perform a dry run to preview operations.
+- `--hf-cache-dir`: Specify a custom Hugging Face cache directory.
+- `--lm-studio-dir`: Specify a custom LM Studio models directory.
+- `--verbose`: Enable verbose (debug) logging.
 
-```bash
-# Custom Hugging Face cache directory
-export HF_HOME="/path/to/huggingface/cache"
-python lmstudio_hf.py
+### Environment Variables
 
-# Custom LM Studio models directory
-export LMSTUDIO_HOME="/path/to/lmstudio/models"
-python lmstudio_hf.py
-
-# Use XDG cache directory
-export XDG_CACHE_HOME="/path/to/cache"
-python lmstudio_hf.py
-
-# Combine multiple environment variables
-export HF_HOME="/custom/hf/cache"
-export LMSTUDIO_HOME="/custom/lmstudio/models"
-python lmstudio_hf.py
-```
-
-### Command Line Options
-
-```bash
-# Perform a dry run to preview operations without making changes
-python lmstudio_hf.py --dry-run
-
-# Specify custom directories via command line
-python lmstudio_hf.py --hf-cache-dir "/path/to/hf/cache" --lm-studio-dir "/path/to/lmstudio/models"
-
-# Enable verbose logging for debugging
-python lmstudio_hf.py --verbose
-```
-
-### Navigation Controls
-
-- ↑/↓ arrows: Navigate through the model list
-- SPACE: Select/deselect a model
-- ENTER: Confirm selection and proceed with import
-- Ctrl+C: Cancel operation
+- `HF_HOME`: Custom Hugging Face cache location.
+- `XDG_CACHE_HOME`: Base directory for the cache on Linux.
+- `LMSTUDIO_HOME`: Custom LM Studio models directory.
 
 ## How It Works
 
-1. The tool scans your Hugging Face cache directory (checks `HF_HOME`, `XDG_CACHE_HOME/huggingface`, or `~/.cache/huggingface`)
-2. Identifies all downloaded models with valid `config.json` files
-3. Creates symbolic links in the LM Studio models directory (`~/.cache/lm-studio/models`)
-4. Shows model type and import status for each model
-5. Pre-selects already imported models for easy management
+The script scans both the Hugging Face and LM Studio model directories to identify all available models. It then presents an interactive list for you to select which models to sync.
 
-Additionally, it can sync models from LM Studio back to the Hugging Face format:
-1. Scans your LM Studio models directory for local models
-2. Exports them to Hugging Face cache format with proper directory structure
-3. Fetches metadata from Hugging Face Hub to create complete cache entries
-
-## Environment Variables
-
-- `HF_HOME`: Optional. Set this to customize your Hugging Face cache location (highest priority)
-- `XDG_CACHE_HOME`: Optional. If set, the tool will look for models in `$XDG_CACHE_HOME/huggingface`
-- `LMSTUDIO_HOME`: Optional. Set this to customize your LM Studio models directory (default: `~/.cache/lm-studio/models`)
-
-## Notes
-
-- Models are imported using symbolic links to save disk space
-- Already imported models are marked with "(already imported)" and pre-selected
-- Deselecting an already imported model and confirming will remove it from LM Studio
-- Model types are displayed in parentheses (e.g., `(llama)`, `(bert)`, `(gpt2)`)
-- The tool supports bidirectional synchronization between Hugging Face and LM Studio
+- **Hugging Face to LM Studio:** When you select a model from your Hugging Face cache, the script creates symbolic links to it in your LM Studio models directory. If a model is already present, you can choose to remove it.
+- **LM Studio to Hugging Face:** When you select a local model from LM Studio, the script fetches its metadata from the Hugging Face Hub, creates the necessary directory structure in your Hugging Face cache, and creates symbolic links to the model files. If a model is already present in the Hugging Face cache, you can choose to remove it and re-sync.
 
 ## Contributing
 
-Feel free to open issues or submit pull requests for any improvements or bug fixes.
+Contributions are welcome! Feel free to open an issue or submit a pull request.
 
 ## License
 
-[MIT License](LICENSE)
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
