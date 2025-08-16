@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ import hashlib
 import urllib.request
 import argparse
 from dataclasses import dataclass, field
+from typing import Tuple, Dict, Any
 
 
 @dataclass
@@ -28,9 +30,9 @@ class LMStudioModel:
 class ModelSyncManager:
     """Manages synchronization of models between Hugging Face cache and LM Studio."""
 
-    def __init__(self, args):
-        self.dry_run = args.dry_run
-        self.dry_run_operations = []
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.dry_run: bool = args.dry_run
+        self.dry_run_operations: list[str] = []
 
         # Setup logging
         if args.verbose:
@@ -39,14 +41,14 @@ class ModelSyncManager:
             logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
         # Determine directories
-        self.hf_cache_dir = self._determine_hf_cache_dir(args)
-        self.lm_studio_dir = self._determine_lm_studio_dir(args)
+        self.hf_cache_dir: Path = self._determine_hf_cache_dir(args)
+        self.lm_studio_dir: Path = self._determine_lm_studio_dir(args)
 
         logging.info(f"Using Hugging Face cache directory: {self.hf_cache_dir}")
         logging.info(f"Using LM Studio models directory: {self.lm_studio_dir}")
         logging.info(f'Using dry run mode: {"true" if self.dry_run else "false"}')
 
-    def _determine_hf_cache_dir(self, args):
+    def _determine_hf_cache_dir(self, args: argparse.Namespace) -> Path:
         """Determine the Hugging Face cache directory."""
         if args.hf_cache_dir:
             return Path(os.path.expanduser(args.hf_cache_dir))
@@ -57,7 +59,7 @@ class ModelSyncManager:
         else:
             return Path(os.path.expanduser("~/.cache/huggingface"))
 
-    def _determine_lm_studio_dir(self, args):
+    def _determine_lm_studio_dir(self, args: argparse.Namespace) -> Path:
         """Determine the LM Studio models directory."""
         if args.lm_studio_dir:
             return Path(os.path.expanduser(args.lm_studio_dir))
@@ -66,7 +68,7 @@ class ModelSyncManager:
         else:
             return Path(os.path.expanduser("~/.cache/lmstudio/models"))
 
-    def sync_models(self):
+    def sync_models(self) -> None:
         """Main synchronization function."""
 
         # Discover models
@@ -83,9 +85,9 @@ class ModelSyncManager:
         if self.dry_run:
             self._show_dry_run_summary()
 
-    def _discover_hf_models(self):
+    def _discover_hf_models(self) -> list[HuggingFaceModel]:
         """Discover models in the Hugging Face cache."""
-        hf_model_candidates = []
+        hf_model_candidates: list[HuggingFaceModel] = []
         discovered_models = set()
 
         # Look in hub directory if it exists
@@ -180,10 +182,11 @@ class ModelSyncManager:
 
         return hf_model_candidates
 
-    def _discover_lm_models(self):
+    def _discover_lm_models(self) -> Tuple[list[LMStudioModel], list[LMStudioModel]]:
         """Discover models in the LM Studio directory."""
-        existing_lm_models = []  # List of LMStudioModel objects
-        lm_model_candidates = []  # Models to sync from LM Studio to Hugging Face
+        existing_lm_models: list[LMStudioModel] = []  # List of LMStudioModel objects
+        # Models to sync from LM Studio to Hugging Face
+        lm_model_candidates: list[LMStudioModel] = []
 
         if self.lm_studio_dir.exists():
             # Check for org/model structure (subdirectories)
@@ -224,7 +227,7 @@ class ModelSyncManager:
 
         return existing_lm_models, lm_model_candidates
 
-    def _is_lm_model_synced_from_hf(self, model_dir):
+    def _is_lm_model_synced_from_hf(self, model_dir: Path) -> bool:
         """Check if a LM Studio model directory is synced from Hugging Face."""
         for item in model_dir.iterdir():
             if item.is_symlink():
@@ -235,14 +238,14 @@ class ModelSyncManager:
                     return True
         return False
 
-    def _sync_hf_to_lm(self, hf_models, existing_lm_models):
+    def _sync_hf_to_lm(self, hf_models: list[HuggingFaceModel], existing_lm_models: list[LMStudioModel]) -> None:
         """Sync models from Hugging Face to LM Studio."""
         if not hf_models:
             logging.info("No models found in Hugging Face cache to sync to LM Studio.")
             return
 
         # Create list of models with their current import status
-        hf_to_lm_model_choices = []
+        hf_to_lm_model_choices: list[Tuple[str, HuggingFaceModel, bool, Path]] = []
         for hf_model in sorted(hf_models, key=lambda x: x.model_name):
             is_present_in_lm = False
             target_lm_path = None
@@ -278,13 +281,15 @@ class ModelSyncManager:
                                     f"Would remove directory: {target_lm_path}")
                                 if not self.dry_run:
                                     shutil.rmtree(target_lm_path)
-                                    logging.info(f"Removed directory {hf_model.model_name} from LM Studio")
+                                    logging.info(
+                                        f"Removed directory {hf_model.model_name} from LM Studio")
                             else:
                                 self._add_dry_run_operation(
                                     f"Would remove symlink: {target_lm_path}")
                                 if not self.dry_run:
                                     target_lm_path.unlink()
-                                    logging.info(f"Removed symlink {hf_model.model_name} from LM Studio")
+                                    logging.info(
+                                        f"Removed symlink {hf_model.model_name} from LM Studio")
 
                     # Create parent directories and target directory
                     self._add_dry_run_operation(f"Would create directory: {target_lm_path}")
@@ -304,16 +309,17 @@ class ModelSyncManager:
                             logging.info(
                                 f"  - Skipping {item.name}: non-symlink file already exists in LM Studio")
 
-                    logging.info(f"  - Successfully synced {hf_model.model_name} to LM Studio at {target_lm_path}")
+                    logging.info(
+                        f"  - Successfully synced {hf_model.model_name} to LM Studio at {target_lm_path}")
 
-    def _sync_lm_to_hf(self, lm_model_candidates, hf_models):
+    def _sync_lm_to_hf(self, lm_model_candidates: Iterable[LMStudioModel], hf_models: Iterable[HuggingFaceModel]) -> None:
         """Sync models from LM Studio to Hugging Face."""
         # Show interactive selection menu for exporting to Hugging Face
         if not lm_model_candidates:
             logging.info("No models found in LM Studio to sync to Hugging Face cache.")
             return
 
-        lm_to_hf_model_choices = []
+        lm_to_hf_model_choices: list[Tuple[str, LMStudioModel, bool, Path]] = []
         for lm_model in lm_model_candidates:
             is_present_in_hf = False
             hf_model_path = self.hf_cache_dir / "hub" / \
@@ -325,7 +331,18 @@ class ModelSyncManager:
                     break
 
             status = " (present in HF)" if is_present_in_hf else ""
-            display_name = f"(local) {lm_model.model_name}{status}"
+
+            model_type = "unknown"
+            config_path = lm_model.model_path / "config.json"
+            if config_path.exists():
+                try:
+                    with open(config_path) as f:
+                        config = json.load(f)
+                        model_type = config.get("model_type", "unknown").lower()
+                except (json.JSONDecodeError, FileNotFoundError):
+                    pass
+
+            display_name = f"({model_type}) {lm_model.model_name}{status}"
             lm_to_hf_model_choices.append((display_name, lm_model, is_present_in_hf, hf_model_path))
 
         if lm_to_hf_model_choices:
@@ -341,15 +358,18 @@ class ModelSyncManager:
                                     f"Would remove directory: {hf_model_path}")
                                 if not self.dry_run:
                                     shutil.rmtree(hf_model_path)
-                                    logging.info(f"Removed directory {lm_model.model_name} from Hugging Face cache")
+                                    logging.info(
+                                        f"Removed directory {lm_model.model_name} from Hugging Face cache")
                             else:
                                 self._add_dry_run_operation(
                                     f"Would remove symlink: {hf_model_path}")
                                 if not self.dry_run:
                                     hf_model_path.unlink()
-                                    logging.info(f"Removed symlink {lm_model.model_name} from Hugging Face cache")
+                                    logging.info(
+                                        f"Removed symlink {lm_model.model_name} from Hugging Face cache")
 
-                    logging.info(f"Syncing {lm_model.model_name} from LM Studio to Hugging Face cache...")
+                    logging.info(
+                        f"Syncing {lm_model.model_name} from LM Studio to Hugging Face cache...")
                     try:
                         # 1. Fetch model info from Hugging Face Hub
                         api_url = f"https://huggingface.co/api/models/{lm_model.model_name}"
@@ -363,7 +383,8 @@ class ModelSyncManager:
                         model_info = json.loads(response["content"])
                         commit_hash = model_info.get("sha")
                         if not commit_hash:
-                            logging.error(f"  - Could not find commit hash for {lm_model.model_name}")
+                            logging.error(
+                                f"  - Could not find commit hash for {lm_model.model_name}")
                             continue
 
                         # 2. Create Hugging Face cache directory structure
@@ -466,11 +487,11 @@ class ModelSyncManager:
                         logging.error(
                             f"  - An error occurred while syncing {lm_model.model_name} to Hugging Face cache: {e}")
 
-    def _add_dry_run_operation(self, operation):
+    def _add_dry_run_operation(self, operation: str) -> None:
         """Add an operation to the dry run operations list."""
         self.dry_run_operations.append(operation)
 
-    def _show_dry_run_summary(self):
+    def _show_dry_run_summary(self) -> None:
         """Show a summary of operations that would be performed in dry run mode."""
         print("\n--- Dry Run Summary ---")
         if self.dry_run_operations:
@@ -480,7 +501,7 @@ class ModelSyncManager:
             print("No file operations would be performed.")
 
 
-def select_models(model_choices, title):
+def select_models(model_choices: list[Tuple[str, Any, Any, Any]], title: str) -> list[Tuple[str, Any, Any, Any]]:
     """Platform-agnostic model selection."""
     if sys.platform == "win32":
         return select_models_windows(model_choices, title)
@@ -488,7 +509,7 @@ def select_models(model_choices, title):
         return select_models_unix(model_choices, title)
 
 
-def select_models_windows(model_choices, title):
+def select_models_windows(model_choices: list[Tuple[str, Any, Any, Any]], title: str) -> list[Tuple[str, Any, Any, Any]]:
     """Model selection for Windows."""
     print(f"\n{title}")
     print("(Enter numbers separated by spaces, e.g., '1 3 4')\n")
@@ -512,7 +533,7 @@ def select_models_windows(model_choices, title):
             print("Invalid input. Please enter numbers separated by spaces.")
 
 
-def select_models_unix(model_choices, title):
+def select_models_unix(model_choices: list[Tuple[str, Any, Any, Any]], title: str) -> list[Tuple[str, Any, Any, Any]]:
     if sys.stdout.isatty():
         input("\nPress Enter to continue...")
 
@@ -571,7 +592,7 @@ def select_models_unix(model_choices, title):
     return [choice for choice, is_selected in zip(model_choices, selected) if is_selected]
 
 
-def get_key():
+def get_key() -> str:
     """Get a single keypress from the user."""
     import tty
     import termios
@@ -588,7 +609,7 @@ def get_key():
     return ch
 
 
-def web_fetch(url):
+def web_fetch(url: str) -> Dict[str, str]:
     """Fetches content from a URL and returns it as a dictionary."""
     try:
         with urllib.request.urlopen(url) as response:
@@ -600,7 +621,7 @@ def web_fetch(url):
         return {"error": str(e)}
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(description="LM Studio - Hugging Face Model Manager")
     parser.add_argument("--dry-run", action="store_true",
