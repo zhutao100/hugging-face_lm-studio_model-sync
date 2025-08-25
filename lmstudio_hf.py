@@ -1,15 +1,16 @@
+import argparse
 from collections.abc import Iterable
+from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
-import sys
 import shutil
-import hashlib
-import urllib.request
-import argparse
-from dataclasses import dataclass, field
+import sys
+import traceback
 from typing import Tuple, Dict, Any
+import urllib.request
 
 
 @dataclass
@@ -513,10 +514,6 @@ class ModelSyncManager:
                                 logging.info(
                                     f"    - Skipping snapshot symlink for {item.name}: non-symlink file already exists in Hugging Face snapshots")
 
-                        # Log user files that are being preserved
-                        for item in user_files:
-                            logging.info(f"    - Preserving user file: {item.name}")
-
                         # In move mode, try to clean up the source directory
                         if self.mode == 'move':
                             self._cleanup_lm_model_directory(lm_model)
@@ -560,6 +557,7 @@ class ModelSyncManager:
                     except Exception as e:
                         logging.error(
                             f"  - An error occurred while syncing {lm_model.model_name} to Hugging Face cache: {e}")
+                        logging.error(traceback.format_exc())
 
     def _add_dry_run_operation(self, operation: str) -> None:
         """Add an operation to the dry run operations list."""
