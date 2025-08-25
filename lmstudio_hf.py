@@ -33,6 +33,7 @@ class ModelSyncManager:
     def __init__(self, args: argparse.Namespace) -> None:
         self.dry_run: bool = args.dry_run
         self.dry_run_operations: list[str] = []
+        self.mode: str = args.mode if hasattr(args, 'mode') else 'symlink'  # Default to symlink
 
         # Setup logging
         if args.verbose:
@@ -47,6 +48,7 @@ class ModelSyncManager:
         logging.info(f"Using Hugging Face cache directory: {self.hf_cache_dir}")
         logging.info(f"Using LM Studio models directory: {self.lm_studio_dir}")
         logging.info(f'Using dry run mode: {"true" if self.dry_run else "false"}')
+        logging.info(f'Using mode: {self.mode}')
 
     def _determine_hf_cache_dir(self, args: argparse.Namespace) -> Path:
         """Determine the Hugging Face cache directory."""
@@ -294,20 +296,36 @@ class ModelSyncManager:
                     # Create parent directories and target directory
                     self._add_dry_run_operation(f"Would create directory: {target_lm_path}")
                     if not self.dry_run:
-                        target_lm_path.mkdir(parents=True, exist_ok=True)
+                        try:
+                            target_lm_path.mkdir(parents=True, exist_ok=True)
+                        except PermissionError as e:
+                            logging.error(f"Permission denied creating directory {target_lm_path}: {e}")
+                            continue
 
-                    # Create symbolic links for all files in the snapshot directory
+                    # Create links or move files based on mode
+                    moved_files_count = 0
                     for item in hf_model.snapshot_path.iterdir():
-                        link_path = target_lm_path / item.name
-                        # Only create symlink if the target path does not exist or is already a symlink
-                        if not link_path.exists() or link_path.is_symlink():
-                            self._add_dry_run_operation(
-                                f"Would create symlink: {link_path} -> {item}")
-                            if not self.dry_run:
-                                os.symlink(item, link_path)
+                        target_path = target_lm_path / item.name
+                        # Only create link/move if the target path does not exist or is already a symlink
+                        if not target_path.exists() or target_path.is_symlink():
+                            if self.mode == 'move':
+                                self._add_dry_run_operation(
+                                    f"Would move: {item} -> {target_path}")
+                                if not self.dry_run:
+                                    shutil.move(str(item), str(target_path))
+                                    moved_files_count += 1
+                            else:  # symlink mode
+                                self._add_dry_run_operation(
+                                    f"Would create symlink: {target_path} -> {item}")
+                                if not self.dry_run:
+                                    os.symlink(item, target_path)
                         else:
                             logging.info(
-                                f"  - Skipping {item.name}: non-symlink file already exists in LM Studio")
+                                f"  - Skipping {item.name}: file already exists in LM Studio")
+
+                    # In move mode, try to clean up the source directory
+                    if self.mode == 'move':
+                        self._cleanup_hf_model_directory(hf_model, moved_files_count)
 
                     logging.info(
                         f"  - Successfully synced {hf_model.model_name} to LM Studio at {target_lm_path}")
@@ -390,19 +408,35 @@ class ModelSyncManager:
                         # 2. Create Hugging Face cache directory structure
                         self._add_dry_run_operation(f"Would create directory: {hf_model_path}")
                         if not self.dry_run:
-                            hf_model_path.mkdir(parents=True, exist_ok=True)
+                            try:
+                                hf_model_path.mkdir(parents=True, exist_ok=True)
+                            except PermissionError as e:
+                                logging.error(f"Permission denied creating directory {hf_model_path}: {e}")
+                                continue
                         self._add_dry_run_operation(
                             f"Would create directory: {hf_model_path / 'refs'}")
                         if not self.dry_run:
-                            (hf_model_path / "refs").mkdir(exist_ok=True)
+                            try:
+                                (hf_model_path / "refs").mkdir(exist_ok=True)
+                            except PermissionError as e:
+                                logging.error(f"Permission denied creating directory {hf_model_path / 'refs'}: {e}")
+                                continue
                         snapshots_dir = hf_model_path / "snapshots"
                         self._add_dry_run_operation(f"Would create directory: {snapshots_dir}")
                         if not self.dry_run:
-                            snapshots_dir.mkdir(exist_ok=True)
+                            try:
+                                snapshots_dir.mkdir(exist_ok=True)
+                            except PermissionError as e:
+                                logging.error(f"Permission denied creating directory {snapshots_dir}: {e}")
+                                continue
                         snapshot_path = snapshots_dir / commit_hash
                         self._add_dry_run_operation(f"Would create directory: {snapshot_path}")
                         if not self.dry_run:
-                            snapshot_path.mkdir(exist_ok=True)
+                            try:
+                                snapshot_path.mkdir(exist_ok=True)
+                            except PermissionError as e:
+                                logging.error(f"Permission denied creating directory {snapshot_path}: {e}")
+                                continue
 
                         # 3. Create refs/main file
                         self._add_dry_run_operation(
@@ -415,37 +449,77 @@ class ModelSyncManager:
                         blobs_dir = hf_model_path / "blobs"
                         self._add_dry_run_operation(f"Would create directory: {blobs_dir}")
                         if not self.dry_run:
-                            blobs_dir.mkdir(exist_ok=True)
+                            try:
+                                blobs_dir.mkdir(exist_ok=True)
+                            except PermissionError as e:
+                                logging.error(f"Permission denied creating directory {blobs_dir}: {e}")
+                                continue
+
+                        # Get the list of model files from Hugging Face API
+                        model_files_from_api = set()
+                        for file_info in model_info.get("siblings", []):
+                            file_name = file_info.get("rfilename")
+                            if file_name:
+                                model_files_from_api.add(file_name)
+
+                        # Identify model files vs user-added files
+                        model_files = []
+                        user_files = []
 
                         for item in lm_model.model_path.iterdir():
                             if item.is_file():
-                                # Calculate SHA256 hash of the file
-                                with open(item, "rb") as f:
-                                    sha256_hash = hashlib.sha256(f.read()).hexdigest()
+                                if item.name in model_files_from_api:
+                                    model_files.append(item)
+                                else:
+                                    user_files.append(item)
 
-                                # Create blob symlink
-                                blob_path = blobs_dir / sha256_hash
-                                # Only create symlink if the target path does not exist or is already a symlink
-                                if not blob_path.exists() or blob_path.is_symlink():
+                        # Log user files that are being preserved
+                        for item in user_files:
+                            logging.info(f"    - Preserving user file: {item.name}")
+
+                        # Process model files
+                        for item in model_files:
+                            # Calculate SHA256 hash of the file
+                            with open(item, "rb") as f:
+                                sha256_hash = hashlib.sha256(f.read()).hexdigest()
+
+                            # Create blob link or move based on mode
+                            blob_path = blobs_dir / sha256_hash
+                            # Only create link/move if the target path does not exist or is already a symlink
+                            if not blob_path.exists() or blob_path.is_symlink():
+                                if self.mode == 'move':
+                                    self._add_dry_run_operation(
+                                        f"Would move: {item} -> {blob_path}")
+                                    if not self.dry_run:
+                                        shutil.move(str(item), str(blob_path))
+                                else:  # symlink mode
                                     self._add_dry_run_operation(
                                         f"Would create symlink: {blob_path} -> {item}")
                                     if not self.dry_run:
                                         os.symlink(item, blob_path)
-                                else:
-                                    logging.info(
-                                        f"    - Skipping blob for {item.name}: non-symlink file already exists in Hugging Face blobs")
+                            else:
+                                logging.info(
+                                    f"    - Skipping blob for {item.name}: file already exists in Hugging Face blobs")
 
-                                # Create snapshot symlink
-                                snapshot_link_path = snapshot_path / item.name
-                                # Only create symlink if the target path does not exist or is already a symlink
-                                if not snapshot_link_path.exists() or snapshot_link_path.is_symlink():
-                                    self._add_dry_run_operation(
-                                        f"Would create symlink: {snapshot_link_path} -> {blob_path}")
-                                    if not self.dry_run:
-                                        os.symlink(blob_path, snapshot_link_path)
-                                else:
-                                    logging.info(
-                                        f"    - Skipping snapshot symlink for {item.name}: non-symlink file already exists in Hugging Face snapshots")
+                            # Create snapshot symlink (always symlink to blob, not affected by mode)
+                            snapshot_link_path = snapshot_path / item.name
+                            # Only create symlink if the target path does not exist or is already a symlink
+                            if not snapshot_link_path.exists() or snapshot_link_path.is_symlink():
+                                self._add_dry_run_operation(
+                                    f"Would create symlink: {snapshot_link_path} -> {blob_path}")
+                                if not self.dry_run:
+                                    os.symlink(blob_path, snapshot_link_path)
+                            else:
+                                logging.info(
+                                    f"    - Skipping snapshot symlink for {item.name}: non-symlink file already exists in Hugging Face snapshots")
+
+                        # Log user files that are being preserved
+                        for item in user_files:
+                            logging.info(f"    - Preserving user file: {item.name}")
+
+                        # In move mode, try to clean up the source directory
+                        if self.mode == 'move':
+                            self._cleanup_lm_model_directory(lm_model)
 
                         # 5. Create config.json and other small metadata files from Hub
                         large_file_extensions = [".gguf", ".safetensors"]
@@ -499,6 +573,90 @@ class ModelSyncManager:
                 print(op)
         else:
             print("No file operations would be performed.")
+
+    def _cleanup_hf_model_directory(self, hf_model: HuggingFaceModel, moved_files_count: int) -> None:
+        """Clean up Hugging Face model directory after moving files in move mode."""
+        if moved_files_count == 0:
+            return
+
+        # Check if the snapshot directory is now empty
+        if not any(hf_model.snapshot_path.iterdir()):
+            # Try to remove the snapshot directory
+            try:
+                if self.dry_run:
+                    self._add_dry_run_operation(f"Would remove empty snapshot directory: {hf_model.snapshot_path}")
+                else:
+                    hf_model.snapshot_path.rmdir()
+                    logging.info(f"  - Removed empty snapshot directory: {hf_model.snapshot_path}")
+            except Exception as e:
+                logging.warning(f"  - Could not remove snapshot directory {hf_model.snapshot_path}: {e}")
+
+        # Check if there are any remaining blob files in the blobs directory
+        blobs_dir = hf_model.snapshot_path.parent.parent / "blobs"
+        has_blobs = blobs_dir.exists() and any(blobs_dir.iterdir())
+
+        # Check if refs directory is safe to remove (only contains main ref)
+        refs_dir = hf_model.snapshot_path.parent.parent / "refs"
+        can_remove_refs = False
+        if refs_dir.exists():
+            refs_files = list(refs_dir.iterdir())
+            # Safe to remove if only contains 'main' or no files
+            can_remove_refs = len(refs_files) == 0 or (len(refs_files) == 1 and refs_files[0].name == "main")
+
+        # Try to remove the entire model directory if no blobs exist and refs can be removed
+        if not has_blobs:
+            # Try to remove refs directory if safe
+            if can_remove_refs and refs_dir.exists():
+                try:
+                    if self.dry_run:
+                        self._add_dry_run_operation(f"Would remove refs directory: {refs_dir}")
+                    else:
+                        shutil.rmtree(refs_dir)
+                        logging.info(f"  - Removed refs directory: {refs_dir}")
+                except Exception as e:
+                    logging.warning(f"  - Could not remove refs directory {refs_dir}: {e}")
+
+            # Try to remove snapshots directory if empty
+            snapshots_dir = hf_model.snapshot_path.parent
+            if snapshots_dir.exists() and not any(snapshots_dir.iterdir()):
+                try:
+                    if self.dry_run:
+                        self._add_dry_run_operation(f"Would remove snapshots directory: {snapshots_dir}")
+                    else:
+                        snapshots_dir.rmdir()
+                        logging.info(f"  - Removed empty snapshots directory: {snapshots_dir}")
+                except Exception as e:
+                    logging.warning(f"  - Could not remove snapshots directory {snapshots_dir}: {e}")
+
+            # Try to remove the top-level model directory if it's now empty
+            model_dir = hf_model.snapshot_path.parent.parent
+            if model_dir.exists() and not any(model_dir.iterdir()):
+                try:
+                    if self.dry_run:
+                        self._add_dry_run_operation(f"Would remove model directory: {model_dir}")
+                    else:
+                        model_dir.rmdir()
+                        logging.info(f"  - Removed empty model directory: {model_dir}")
+                except Exception as e:
+                    logging.warning(f"  - Could not remove model directory {model_dir}: {e}")
+        elif not self.dry_run:
+            logging.warning(
+                f"  - Hugging Face model directory for {hf_model.model_name} not removed: blob files still exist")
+
+    def _cleanup_lm_model_directory(self, lm_model: LMStudioModel) -> None:
+        """Clean up LM Studio model directory after moving files in move mode."""
+        # Check if the model directory is now empty
+        if lm_model.model_path.exists() and not any(lm_model.model_path.iterdir()):
+            try:
+                if self.dry_run:
+                    self._add_dry_run_operation(f"Would remove empty LM Studio model directory: {lm_model.model_path}")
+                else:
+                    lm_model.model_path.rmdir()
+                    logging.info(f"  - Removed empty LM Studio model directory: {lm_model.model_path}")
+            except Exception as e:
+                logging.warning(f"  - Could not remove LM Studio model directory {lm_model.model_path}: {e}")
+        elif not self.dry_run:
+            logging.warning(f"  - LM Studio model directory for {lm_model.model_name} not removed: files still exist")
 
 
 def select_models(model_choices: list[Tuple[str, Any, Any, Any]], title: str) -> list[Tuple[str, Any, Any, Any]]:
@@ -630,6 +788,8 @@ def main() -> None:
     parser.add_argument("--hf-cache-dir", type=str,
                         help="Specify the Hugging Face cache directory.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose (debug) logging.")
+    parser.add_argument("--mode", choices=["symlink", "move"], default="symlink",
+                        help="Specify the sync mode: 'symlink' (default) or 'move'.")
     args = parser.parse_args()
 
     # Create manager and sync models

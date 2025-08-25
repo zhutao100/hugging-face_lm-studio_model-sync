@@ -1,0 +1,15 @@
+# This project uses only standard library Python modules, so no external dependencies are needed.
+# However, for testing purposes, you might want to use additional tools.
+
+# For running tests
+# python3 -m pytest  # Alternative test runner
+
+# For code coverage
+# coverage
+
+# For linting
+# flake8
+# pylint
+
+# For type checking
+# mypy
