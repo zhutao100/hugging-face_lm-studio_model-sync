@@ -1,4 +1,4 @@
-# LM Studio - Hugging Face Model Manager
+# Hugging Face - LM Studio Model Manager
 
 A command-line utility to seamlessly manage and synchronize machine learning models between your Hugging Face cache and LM Studio. This tool simplifies the process of importing, exporting, and maintaining models across both platforms.
 
@@ -24,8 +24,8 @@ A command-line utility to seamlessly manage and synchronize machine learning mod
 1. Clone this repository:
 
     ```bash
-    git clone https://github.com/ivanfioravanti/lmstudio_hf.git
-    cd lmstudio_hf
+    git clone https://github.com/zhutao100/hugging-face_lm-studio_model-sync.git
+    cd hugging-face_lm-studio_model-sync
     ```
 
 ## Usage
@@ -33,7 +33,7 @@ A command-line utility to seamlessly manage and synchronize machine learning mod
 Run the script from your terminal:
 
 ```bash
-python lmstudio_hf.py
+python hugging-face_lm-studio_model-sync.py
 ```
 
 ### Command-Line Options

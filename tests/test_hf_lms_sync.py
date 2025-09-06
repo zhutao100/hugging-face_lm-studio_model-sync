@@ -1,4 +1,4 @@
-from lmstudio_hf import (
+from hf_lms_sync import (
     HuggingFaceModel,
     LMStudioModel,
     ModelSyncManager,
@@ -318,7 +318,7 @@ class TestCleanupFunctionality(BaseTest):
         # Test cleanup
         self.mock_args.mode = "move"
         manager = ModelSyncManager(self.mock_args)
-        with patch('lmstudio_hf.logging.warning') as mock_warning:
+        with patch('hf_lms_sync.logging.warning') as mock_warning:
             manager._cleanup_lm_model_directory(model)
 
             # Directory should not be removed
@@ -345,7 +345,7 @@ class TestEndToEndSync(BaseTest):
         refs_dir.mkdir(parents=True)
         (refs_dir / "main").write_text("dummy_hash")
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_sync_hf_to_lm_symlink(self):
         """Test syncing from HF to LM Studio with symlinks."""
         self.mock_args.mode = "symlink"
@@ -358,7 +358,7 @@ class TestEndToEndSync(BaseTest):
         self.assertTrue(lm_model_path.exists())
         self.assertTrue((lm_model_path / "config.json").is_symlink())
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_sync_hf_to_lm_move(self):
         """Test syncing from HF to LM Studio with move."""
         self.mock_args.mode = "move"
@@ -375,8 +375,8 @@ class TestEndToEndSync(BaseTest):
         hf_model_path = self.hf_cache_dir / "hub" / "models--test--model2" / "snapshots" / "dummy_hash" / "config.json"
         self.assertFalse(hf_model_path.exists())
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
-    @patch('lmstudio_hf.web_fetch')
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.web_fetch')
     def test_sync_lm_to_hf_symlink(self, mock_web_fetch):
         """Test syncing from LM Studio to HF with symlinks."""
         self.mock_args.mode = "symlink"
@@ -404,8 +404,8 @@ class TestEndToEndSync(BaseTest):
         lm_model_path = self.lm_studio_dir / "test" / "model3" / "config.json"
         self.assertTrue(lm_model_path.exists())
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
-    @patch('lmstudio_hf.web_fetch')
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.web_fetch')
     def test_sync_lm_to_hf_move(self, mock_web_fetch):
         """Test syncing from LM Studio to HF with move."""
         self.mock_args.mode = "move"
@@ -433,7 +433,7 @@ class TestEndToEndSync(BaseTest):
         lm_model_path = self.lm_studio_dir / "test" / "model4" / "config.json"
         self.assertFalse(lm_model_path.exists())
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_sync_hf_to_lm_existing(self):
         """Test syncing from HF to LM Studio when model already exists."""
         self.mock_args.mode = "symlink"
@@ -452,8 +452,8 @@ class TestEndToEndSync(BaseTest):
 class TestFullEndToEndWorkflow(BaseTest):
     """Test full end-to-end workflows that simulate real user scenarios."""
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
-    @patch('lmstudio_hf.web_fetch')
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.web_fetch')
     def test_complete_workflow_hf_to_lm_to_hf(self, mock_web_fetch):
         """Test a complete workflow: HF -> LM (symlink) -> HF (move)."""
         # Step 1: Create a model in HF cache
@@ -538,7 +538,7 @@ class TestFullEndToEndWorkflow(BaseTest):
         refs_dir.mkdir()
         (refs_dir / "main").write_text("dummy_hash")
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_workflow_with_multiple_models(self):
         """Test syncing multiple models in one run."""
         # Create multiple HF models
@@ -549,7 +549,7 @@ class TestFullEndToEndWorkflow(BaseTest):
         self._create_lm_model("test/model_c", {"config.json": '{"model_type": "mistral"}'})
 
         # Mock web fetch for LM Studio model sync
-        with patch('lmstudio_hf.web_fetch') as mock_web_fetch:
+        with patch('hf_lms_sync.web_fetch') as mock_web_fetch:
             mock_web_fetch.return_value = {"content": '{"sha": "commit_hash"}'}
 
             manager = ModelSyncManager(self.mock_args)
@@ -583,7 +583,7 @@ class TestDryRunMode(BaseTest):
         refs_dir.mkdir(parents=True)
         (refs_dir / "main").write_text("dummy_hash")
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_dry_run_hf_to_lm(self):
         """Test dry run mode for HF to LM sync."""
         self.mock_args.dry_run = True
@@ -600,7 +600,7 @@ class TestDryRunMode(BaseTest):
         self.assertTrue(len(manager.dry_run_operations) > 0)
         self.assertIn("Would create directory", manager.dry_run_operations[0])
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_dry_run_summary(self):
         """Test that dry run summary is shown."""
         self.mock_args.dry_run = True
@@ -631,8 +631,8 @@ class TestErrorHandling(BaseTest):
         refs_dir.mkdir(parents=True)
         (refs_dir / "main").write_text("dummy_hash")
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
-    @patch('lmstudio_hf.web_fetch')
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.web_fetch')
     def test_sync_with_web_fetch_error(self, mock_web_fetch):
         """Test syncing when web fetch fails."""
         # Mock web fetch to return an error
@@ -644,12 +644,12 @@ class TestErrorHandling(BaseTest):
         manager = ModelSyncManager(self.mock_args)
 
         # Should not crash on web fetch error
-        with patch('lmstudio_hf.logging.error') as mock_error:
+        with patch('hf_lms_sync.logging.error') as mock_error:
             manager.sync_models()
             # Should log the error
             mock_error.assert_called()
 
-    @patch('lmstudio_hf.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_sync_with_permission_error(self):
         """Test syncing when there are permission errors."""
         self._create_hf_model("test/perm_model", {"config.json": '{"model_type": "test"}'})
@@ -660,7 +660,7 @@ class TestErrorHandling(BaseTest):
         manager = ModelSyncManager(self.mock_args)
 
         # Should not crash on permission error
-        with patch('lmstudio_hf.logging.error') as mock_error:
+        with patch('hf_lms_sync.logging.error') as mock_error:
             manager.sync_models()
             # Should log the error
             mock_error.assert_called()
