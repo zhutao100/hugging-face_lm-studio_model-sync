@@ -41,13 +41,30 @@ class BaseTest(unittest.TestCase):
         """Clean up test fixtures."""
         shutil.rmtree(self.test_dir)
 
+    def _write_files(self, root_dir: Path, files: dict[str, str]) -> None:
+        for file_name, content in files.items():
+            file_path = root_dir / file_name
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content)
+
     def _create_lm_model(self, model_name, files):
         """Helper to create a dummy LM Studio model."""
         model_dir = self.lm_studio_dir / model_name
-        model_dir.mkdir(parents=True)
+        model_dir.mkdir(parents=True, exist_ok=True)
 
-        for file_name, content in files.items():
-            (model_dir / file_name).write_text(content)
+        self._write_files(model_dir, files)
+
+    def _create_hf_model(self, model_name: str, files: dict[str, str], commit_hash: str = "dummy_hash") -> None:
+        """Helper to create a dummy Hugging Face model."""
+        model_dir = self.hf_cache_dir / "hub" / f"models--{model_name.replace('/', '--')}"
+        snapshot_dir = model_dir / "snapshots" / commit_hash
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        self._write_files(snapshot_dir, files)
+
+        refs_dir = model_dir / "refs"
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        (refs_dir / "main").write_text(commit_hash)
 
 
 class TestModelClasses(unittest.TestCase):
@@ -332,19 +349,6 @@ class TestCleanupFunctionality(BaseTest):
 class TestEndToEndSync(BaseTest):
     """Test end-to-end synchronization."""
 
-    def _create_hf_model(self, model_name, files):
-        """Helper to create a dummy Hugging Face model."""
-        model_dir = self.hf_cache_dir / "hub" / f"models--{model_name.replace('/', '--')}"
-        snapshot_dir = model_dir / "snapshots" / "dummy_hash"
-        snapshot_dir.mkdir(parents=True)
-
-        for file_name, content in files.items():
-            (snapshot_dir / file_name).write_text(content)
-
-        refs_dir = model_dir / "refs"
-        refs_dir.mkdir(parents=True)
-        (refs_dir / "main").write_text("dummy_hash")
-
     @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_sync_hf_to_lm_symlink(self):
         """Test syncing from HF to LM Studio with symlinks."""
@@ -357,6 +361,26 @@ class TestEndToEndSync(BaseTest):
         lm_model_path = self.lm_studio_dir / "test" / "model1"
         self.assertTrue(lm_model_path.exists())
         self.assertTrue((lm_model_path / "config.json").is_symlink())
+
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
+    def test_sync_hf_to_lm_symlink_with_subdirectories(self):
+        """Test syncing from HF to LM Studio with nested subdirectories."""
+        self.mock_args.mode = "symlink"
+        self._create_hf_model(
+            "test/model1_subdir",
+            {
+                "config.json": '{"model_type": "test"}',
+                "tokenizer/config.json": '{"tokenizer": "test"}',
+            },
+        )
+
+        manager = ModelSyncManager(self.mock_args)
+        manager.sync_models()
+
+        lm_model_path = self.lm_studio_dir / "test" / "model1_subdir"
+        self.assertTrue(lm_model_path.exists())
+        self.assertTrue((lm_model_path / "config.json").is_symlink())
+        self.assertTrue((lm_model_path / "tokenizer" / "config.json").is_symlink())
 
     @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_sync_hf_to_lm_move(self):
@@ -434,6 +458,29 @@ class TestEndToEndSync(BaseTest):
         self.assertFalse(lm_model_path.exists())
 
     @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
+    @patch('hf_lms_sync.web_fetch')
+    def test_sync_lm_to_hf_move_with_subdirectories(self, mock_web_fetch):
+        """Test syncing from LM Studio to HF with nested subdirectories."""
+        self.mock_args.mode = "move"
+        mock_web_fetch.return_value = {
+            "content": json.dumps({
+                "sha": "dummy_hash",
+                "siblings": [{"rfilename": "tokenizer/config.json"}],
+            })
+        }
+        self._create_lm_model("test/model4_subdir", {"tokenizer/config.json": '{"model_type": "test"}'})
+
+        manager = ModelSyncManager(self.mock_args)
+        manager.sync_models()
+
+        hf_model_path = self.hf_cache_dir / "hub" / "models--test--model4_subdir"
+        snapshot_path = hf_model_path / "snapshots" / "dummy_hash"
+        self.assertTrue((snapshot_path / "tokenizer" / "config.json").is_symlink())
+
+        lm_model_path = self.lm_studio_dir / "test" / "model4_subdir" / "tokenizer" / "config.json"
+        self.assertFalse(lm_model_path.exists())
+
+    @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_sync_hf_to_lm_existing(self):
         """Test syncing from HF to LM Studio when model already exists."""
         self.mock_args.mode = "symlink"
@@ -458,7 +505,7 @@ class TestFullEndToEndWorkflow(BaseTest):
         """Test a complete workflow: HF -> LM (symlink) -> HF (move)."""
         # Step 1: Create a model in HF cache
         model_name = "test/workflow_model"
-        self._create_hf_model_in_cache(model_name, {
+        self._create_hf_model(model_name, {
             "config.json": '{"model_type": "llama"}',
             "tokenizer.json": '{"model": "tokenizer"}'
         })
@@ -525,25 +572,12 @@ class TestFullEndToEndWorkflow(BaseTest):
         # (In real implementation, all files would be processed)
         self.assertTrue((lm_model_path / "user_notes.txt").exists())
 
-    def _create_hf_model_in_cache(self, model_name, files):
-        """Helper to create a complete Hugging Face model in cache."""
-        model_dir = self.hf_cache_dir / "hub" / f"models--{model_name.replace('/', '--')}"
-        snapshot_dir = model_dir / "snapshots" / "dummy_hash"
-        snapshot_dir.mkdir(parents=True)
-
-        for file_name, content in files.items():
-            (snapshot_dir / file_name).write_text(content)
-
-        refs_dir = model_dir / "refs"
-        refs_dir.mkdir()
-        (refs_dir / "main").write_text("dummy_hash")
-
     @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_workflow_with_multiple_models(self):
         """Test syncing multiple models in one run."""
         # Create multiple HF models
-        self._create_hf_model_in_cache("test/model_a", {"config.json": '{"model_type": "llama"}'})
-        self._create_hf_model_in_cache("test/model_b", {"config.json": '{"model_type": "gpt"}'})
+        self._create_hf_model("test/model_a", {"config.json": '{"model_type": "llama"}'})
+        self._create_hf_model("test/model_b", {"config.json": '{"model_type": "gpt"}'})
 
         # Create an LM Studio model
         self._create_lm_model("test/model_c", {"config.json": '{"model_type": "mistral"}'})
@@ -569,19 +603,6 @@ class TestFullEndToEndWorkflow(BaseTest):
 
 class TestDryRunMode(BaseTest):
     """Test dry run functionality."""
-
-    def _create_hf_model(self, model_name, files):
-        """Helper to create a dummy Hugging Face model."""
-        model_dir = self.hf_cache_dir / "hub" / f"models--{model_name.replace('/', '--')}"
-        snapshot_dir = model_dir / "snapshots" / "dummy_hash"
-        snapshot_dir.mkdir(parents=True)
-
-        for file_name, content in files.items():
-            (snapshot_dir / file_name).write_text(content)
-
-        refs_dir = model_dir / "refs"
-        refs_dir.mkdir(parents=True)
-        (refs_dir / "main").write_text("dummy_hash")
 
     @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     def test_dry_run_hf_to_lm(self):
@@ -617,19 +638,6 @@ class TestDryRunMode(BaseTest):
 
 class TestErrorHandling(BaseTest):
     """Test error handling scenarios."""
-
-    def _create_hf_model(self, model_name, files):
-        """Helper to create a dummy Hugging Face model."""
-        model_dir = self.hf_cache_dir / "hub" / f"models--{model_name.replace('/', '--')}"
-        snapshot_dir = model_dir / "snapshots" / "dummy_hash"
-        snapshot_dir.mkdir(parents=True)
-
-        for file_name, content in files.items():
-            (snapshot_dir / file_name).write_text(content)
-
-        refs_dir = model_dir / "refs"
-        refs_dir.mkdir(parents=True)
-        (refs_dir / "main").write_text("dummy_hash")
 
     @patch('hf_lms_sync.select_models', new=lambda choices, title: choices)
     @patch('hf_lms_sync.web_fetch')

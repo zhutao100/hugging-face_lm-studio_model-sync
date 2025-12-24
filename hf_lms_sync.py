@@ -165,10 +165,10 @@ class ModelSyncManager:
                     if snapshot_path and model_name:
                         # Check if this model is already a reverse-synced model (symlinks pointing to LM Studio)
                         is_synced_from_lm = False
-                        for item in snapshot_path.iterdir():
+                        for item in _walk_entries(snapshot_path):
                             if item.is_symlink():
                                 resolved_path = Path(os.path.realpath(item))
-                                if self.lm_studio_dir in resolved_path.parents:
+                                if resolved_path == self.lm_studio_dir or self.lm_studio_dir in resolved_path.parents:
                                     logging.debug(
                                         f"Hugging Face model {model_name} is synced from LM Studio: {resolved_path.parent}, skipping")
                                     is_synced_from_lm = True
@@ -232,10 +232,10 @@ class ModelSyncManager:
 
     def _is_lm_model_synced_from_hf(self, model_dir: Path) -> bool:
         """Check if a LM Studio model directory is synced from Hugging Face."""
-        for item in model_dir.iterdir():
+        for item in _walk_entries(model_dir):
             if item.is_symlink():
                 resolved_path = Path(os.path.realpath(item))
-                if self.hf_cache_dir in resolved_path.parents:
+                if resolved_path == self.hf_cache_dir or self.hf_cache_dir in resolved_path.parents:
                     logging.debug(
                         f"LM Studio model {model_dir.name} is synced from Hugging Face: {resolved_path.parent}, skipping")
                     return True
@@ -305,24 +305,33 @@ class ModelSyncManager:
 
                     # Create links or move files based on mode
                     moved_files_count = 0
-                    for item in hf_model.snapshot_path.iterdir():
-                        target_path = target_lm_path / item.name
+                    source_files = [p for p in hf_model.snapshot_path.rglob("*") if p.is_file()]
+                    for src_path in sorted(source_files):
+                        rel_path = src_path.relative_to(hf_model.snapshot_path)
+                        target_path = target_lm_path / rel_path
+
                         # Only create link/move if the target path does not exist or is already a symlink
-                        if not target_path.exists() or target_path.is_symlink():
-                            if self.mode == 'move':
-                                self._add_dry_run_operation(
-                                    f"Would move: {item} -> {target_path}")
-                                if not self.dry_run:
-                                    shutil.move(str(item), str(target_path))
-                                    moved_files_count += 1
-                            else:  # symlink mode
-                                self._add_dry_run_operation(
-                                    f"Would create symlink: {target_path} -> {item}")
-                                if not self.dry_run:
-                                    os.symlink(item, target_path)
-                        else:
+                        if target_path.exists() and not target_path.is_symlink():
                             logging.info(
-                                f"  - Skipping {item.name}: file already exists in LM Studio")
+                                f"  - Skipping {rel_path.as_posix()}: file already exists in LM Studio")
+                            continue
+
+                        if self.mode == 'move':
+                            self._add_dry_run_operation(
+                                f"Would move: {src_path} -> {target_path}")
+                            if not self.dry_run:
+                                target_path.parent.mkdir(parents=True, exist_ok=True)
+                                if src_path.is_symlink():
+                                    shutil.copy2(src_path.resolve(), target_path)
+                                    src_path.unlink()
+                                else:
+                                    shutil.move(str(src_path), str(target_path))
+                                moved_files_count += 1
+                        else:  # symlink mode
+                            self._add_dry_run_operation(
+                                f"Would create symlink: {target_path} -> {src_path}")
+                            if not self.dry_run:
+                                create_symlink_with_dirs(src_path, target_path)
 
                     # In move mode, try to clean up the source directory
                     if self.mode == 'move':
@@ -464,22 +473,23 @@ class ModelSyncManager:
                                 model_files_from_api.add(file_name)
 
                         # Identify model files vs user-added files
-                        model_files = []
-                        user_files = []
-
-                        for item in lm_model.model_path.iterdir():
-                            if item.is_file():
-                                if item.name in model_files_from_api:
-                                    model_files.append(item)
-                                else:
-                                    user_files.append(item)
+                        model_files: list[tuple[Path, Path]] = []
+                        user_files: list[Path] = []
+                        
+                        files = [p for p in lm_model.model_path.rglob("*") if p.is_file()]
+                        for item in files:
+                            rel_path = item.relative_to(lm_model.model_path)
+                            if rel_path.as_posix() in model_files_from_api:
+                                model_files.append((item, rel_path))
+                            else:
+                                user_files.append(item)
 
                         # Log user files that are being preserved
                         for item in user_files:
-                            logging.info(f"    - Preserving user file: {item.name}")
+                            logging.info(f"    - Preserving user file: {str(item)}")
 
                         # Process model files
-                        for item in model_files:
+                        for item, rel_path in model_files:
                             # Calculate SHA256 hash of the file
                             with open(item, "rb") as f:
                                 sha256_hash = hashlib.sha256(f.read()).hexdigest()
@@ -497,22 +507,22 @@ class ModelSyncManager:
                                     self._add_dry_run_operation(
                                         f"Would create symlink: {blob_path} -> {item}")
                                     if not self.dry_run:
-                                        os.symlink(item, blob_path)
+                                        create_symlink_with_dirs(item, blob_path)
                             else:
                                 logging.info(
-                                    f"    - Skipping blob for {item.name}: file already exists in Hugging Face blobs")
+                                    f"    - Skipping blob for {str(item)}: file already exists in Hugging Face blobs")
 
                             # Create snapshot symlink (always symlink to blob, not affected by mode)
-                            snapshot_link_path = snapshot_path / item.name
+                            snapshot_link_path = snapshot_path / rel_path
                             # Only create symlink if the target path does not exist or is already a symlink
                             if not snapshot_link_path.exists() or snapshot_link_path.is_symlink():
                                 self._add_dry_run_operation(
                                     f"Would create symlink: {snapshot_link_path} -> {blob_path}")
                                 if not self.dry_run:
-                                    os.symlink(blob_path, snapshot_link_path)
+                                    create_symlink_with_dirs(blob_path, snapshot_link_path)
                             else:
                                 logging.info(
-                                    f"    - Skipping snapshot symlink for {item.name}: non-symlink file already exists in Hugging Face snapshots")
+                                    f"    - Skipping snapshot symlink for {str(item)}: non-symlink file already exists in Hugging Face snapshots")
 
                         # In move mode, try to clean up the source directory
                         if self.mode == 'move':
@@ -549,7 +559,7 @@ class ModelSyncManager:
                                         self._add_dry_run_operation(
                                             f"Would create symlink: {snapshot_file_path} -> {blob_path}")
                                         if not self.dry_run:
-                                            os.symlink(blob_path, snapshot_file_path)
+                                            create_symlink_with_dirs(blob_path, snapshot_file_path)
 
                         logging.info(
                             f"  - Successfully synced {lm_model.model_name} to Hugging Face cache at {hf_model_path}")
@@ -577,8 +587,11 @@ class ModelSyncManager:
         if moved_files_count == 0:
             return
 
+        if hf_model.snapshot_path.exists():
+            _remove_empty_dirs(hf_model.snapshot_path)
+
         # Check if the snapshot directory is now empty
-        if not any(hf_model.snapshot_path.iterdir()):
+        if hf_model.snapshot_path.exists() and not any(hf_model.snapshot_path.iterdir()):
             # Try to remove the snapshot directory
             try:
                 if self.dry_run:
@@ -643,6 +656,9 @@ class ModelSyncManager:
 
     def _cleanup_lm_model_directory(self, lm_model: LMStudioModel) -> None:
         """Clean up LM Studio model directory after moving files in move mode."""
+        if lm_model.model_path.exists():
+            _remove_empty_dirs(lm_model.model_path)
+
         # Check if the model directory is now empty
         if lm_model.model_path.exists() and not any(lm_model.model_path.iterdir()):
             try:
@@ -775,6 +791,30 @@ def web_fetch(url: str) -> Dict[str, str]:
                 return {"error": f"HTTP Error: {response.status}"}
     except Exception as e:
         return {"error": str(e)}
+
+def create_symlink_with_dirs(src, dst):
+    parent_dir = os.path.dirname(dst)
+    if parent_dir and not os.path.exists(parent_dir):
+        os.makedirs(parent_dir, exist_ok=True)
+    os.symlink(src, dst)
+
+
+def _walk_entries(root: Path) -> Iterable[Path]:
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for dirname in dirnames:
+            yield Path(dirpath) / dirname
+        for filename in filenames:
+            yield Path(dirpath) / filename
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False, followlinks=False):
+        if dirnames or filenames:
+            continue
+        try:
+            Path(dirpath).rmdir()
+        except OSError:
+            continue
 
 
 def main() -> None:
